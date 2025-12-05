@@ -1,4 +1,4 @@
-name: Create Tag in Multiple Repositories
+name: Create Tag and Release in Multiple Repositories
 
 on:
   workflow_dispatch:
@@ -12,11 +12,25 @@ on:
         required: false
         type: string
         default: ''
+      release_name:
+        description: 'Release name (defaults to tag name if empty)'
+        required: false
+        type: string
+        default: ''
+      release_body:
+        description: 'Release notes/body'
+        required: false
+        type: string
+        default: ''
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
       repositories:
         description: 'Comma-separated list of repository names (same owner)'
         required: true
         type: string
-        # Example: "repo1,repo2,repo3"
       ref:
         description: 'Branch or commit SHA to tag (default: main)'
         required: false
@@ -24,29 +38,41 @@ on:
         default: 'main'
 
 jobs:
-  create-tags:
+  create-tags-and-releases:
     runs-on: ubuntu-latest
     steps:
       - name: Validate inputs
         run: |
-          if [[ ! "${{ inputs.tag_name }}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+          if [[ ! "${{ inputs.tag_name }}" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
             echo "Error: Invalid tag name format"
             exit 1
           fi
 
-      - name: Create tags in repositories
+      - name: Create tags and releases in repositories
         env:
           GH_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
         run: |
+          set -e
+          
           OWNER="${{ github.repository_owner }}"
           TAG_NAME="${{ inputs.tag_name }}"
           TAG_MESSAGE="${{ inputs.tag_message }}"
+          RELEASE_NAME="${{ inputs.release_name }}"
+          RELEASE_BODY="${{ inputs.release_body }}"
+          PRERELEASE="${{ inputs.prerelease }}"
           REF="${{ inputs.ref }}"
+          
+          # Use tag name as release name if not specified
+          if [ -z "$RELEASE_NAME" ]; then
+            RELEASE_NAME="$TAG_NAME"
+          fi
           
           # Convert comma-separated list to array
           IFS=',' read -ra REPOS <<< "${{ inputs.repositories }}"
           
-          echo "Creating tag '$TAG_NAME' in ${#REPOS[@]} repositories..."
+          FAILED=0
+          
+          echo "Creating tag '$TAG_NAME' and release in ${#REPOS[@]} repositories..."
           echo "=============================================="
           
           for repo in "${REPOS[@]}"; do
@@ -58,30 +84,33 @@ jobs:
             echo "----------------------------------------------"
             
             # Get the SHA of the ref (branch or commit)
-            SHA=$(gh api "repos/$OWNER/$repo/git/ref/heads/$REF" --jq '.object.sha' 2>/dev/null || echo "")
+            SHA=""
             
-            # If not a branch, try as a direct SHA
-            if [ -z "$SHA" ]; then
-              # Verify the commit exists
-              SHA=$(gh api "repos/$OWNER/$repo/git/commits/$REF" --jq '.sha' 2>/dev/null || echo "")
-            fi
-            
-            if [ -z "$SHA" ]; then
+            # Try as a branch first
+            if SHA=$(gh api "repos/$OWNER/$repo/git/ref/heads/$REF" --jq '.object.sha' 2>/dev/null); then
+              echo "  Found branch '$REF' with SHA: $SHA"
+            # Try as a tag
+            elif SHA=$(gh api "repos/$OWNER/$repo/git/ref/tags/$REF" --jq '.object.sha' 2>/dev/null); then
+              echo "  Found tag '$REF' with SHA: $SHA"
+            # Try as a direct commit SHA
+            elif SHA=$(gh api "repos/$OWNER/$repo/git/commits/$REF" --jq '.sha' 2>/dev/null); then
+              echo "  Found commit SHA: $SHA"
+            else
               echo "❌ Error: Could not find ref '$REF' in $OWNER/$repo"
+              FAILED=1
               continue
             fi
             
-            echo "  Found SHA: $SHA"
-            
-            # Check if tag already exists (must check actual ref field, not exit code)
-            TAG_REF=$(gh api "repos/$OWNER/$repo/git/ref/tags/$TAG_NAME" --jq '.ref' 2>/dev/null) || true
-            if [ -n "$TAG_REF" ]; then
+            # Check if tag already exists
+            if gh api "repos/$OWNER/$repo/git/ref/tags/$TAG_NAME" --silent 2>/dev/null; then
               echo "⚠️  Tag '$TAG_NAME' already exists in $OWNER/$repo - skipping"
               continue
             fi
             
+            # Create the tag
             if [ -n "$TAG_MESSAGE" ]; then
-              # Create annotated tag
+              echo "  Creating annotated tag..."
+              # Create annotated tag object
               TAG_SHA=$(gh api "repos/$OWNER/$repo/git/tags" \
                 -X POST \
                 -f tag="$TAG_NAME" \
@@ -94,18 +123,47 @@ jobs:
               gh api "repos/$OWNER/$repo/git/refs" \
                 -X POST \
                 -f ref="refs/tags/$TAG_NAME" \
-                -f sha="$TAG_SHA"
+                -f sha="$TAG_SHA" \
+                --silent
             else
+              echo "  Creating lightweight tag..."
               # Create lightweight tag (just a reference)
               gh api "repos/$OWNER/$repo/git/refs" \
                 -X POST \
                 -f ref="refs/tags/$TAG_NAME" \
-                -f sha="$SHA"
+                -f sha="$SHA" \
+                --silent
             fi
             
             echo "✅ Successfully created tag '$TAG_NAME' in $OWNER/$repo"
+            
+            # Create the release
+            echo "  Creating release..."
+            RELEASE_ARGS=(
+              "repos/$OWNER/$repo/releases"
+              -X POST
+              -f tag_name="$TAG_NAME"
+              -f name="$RELEASE_NAME"
+              -f body="$RELEASE_BODY"
+              -F draft=false
+              -F prerelease="$PRERELEASE"
+            )
+            
+            if gh api "${RELEASE_ARGS[@]}" --silent; then
+              echo "✅ Successfully created release '$RELEASE_NAME' in $OWNER/$repo"
+            else
+              echo "❌ Failed to create release in $OWNER/$repo"
+              FAILED=1
+            fi
+            
           done
           
           echo ""
           echo "=============================================="
-          echo "Tag creation complete!"
+          
+          if [ "$FAILED" -eq 1 ]; then
+            echo "⚠️  Some operations failed. Check the logs above."
+            exit 1
+          fi
+          
+          echo "Tag and release creation complete!"
