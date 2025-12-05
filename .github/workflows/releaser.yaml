@@ -73,9 +73,9 @@ jobs:
             
             echo "  Found SHA: $SHA"
             
-            # Check if tag already exists
-            EXISTING_TAG=$(gh api "repos/$OWNER/$repo/git/ref/tags/$TAG_NAME" 2>/dev/null || echo "")
-            if [ -n "$EXISTING_TAG" ]; then
+            # Check if tag already exists (must check actual ref field, not exit code)
+            TAG_REF=$(gh api "repos/$OWNER/$repo/git/ref/tags/$TAG_NAME" --jq '.ref' 2>/dev/null) || true
+            if [ -n "$TAG_REF" ]; then
               echo "⚠️  Tag '$TAG_NAME' already exists in $OWNER/$repo - skipping"
               continue
             fi
