@@ -31,6 +31,7 @@ on:
         description: 'Comma-separated list of repository names (same owner)'
         required: true
         type: string
+        default: 'epos-gui,resources-service,converter-routine-go,converter-service-go,epos-api-gateway,ingestor-service,backoffice-service,email-sender-service,sharing-service,external-access-service,metadata-database'
       ref:
         description: 'Branch or commit SHA to tag (default: main)'
         required: false
